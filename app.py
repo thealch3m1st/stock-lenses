@@ -1,16 +1,42 @@
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
 import duckdb
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+from plotly.subplots import make_subplots
 
 DATA_DIR = Path("/data")
 DB_PATH = DATA_DIR / "stocks.duckdb"
 FRESHNESS_DAYS = 3
 HISTORY_PERIOD = "1y"
+
+
+@dataclass(frozen=True)
+class Basket:
+    key: str
+    label: str
+    tickers: tuple[str, ...]
+    start_value: float
+
+
+BASKETS: dict[str, Basket] = {
+    "stocks": Basket(
+        key="stocks",
+        label="Dollar stocks",
+        tickers=("AAPL", "MSFT", "GOOGL", "AMZN"),
+        start_value=10_000.0,
+    ),
+    "crypto": Basket(
+        key="crypto",
+        label="Crypto",
+        tickers=("BTC-USD", "ETH-USD", "SOL-USD"),
+        start_value=10_000.0,
+    ),
+}
 
 
 def get_connection() -> duckdb.DuckDBPyConnection:
@@ -65,7 +91,6 @@ def fetch_and_store(conn: duckdb.DuckDBPyConnection, ticker: str) -> pd.DataFram
     if raw.empty:
         raise ValueError(f"No data returned for ticker '{ticker}'.")
 
-    # yfinance may return MultiIndex columns when downloading a single ticker.
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.get_level_values(0)
 
@@ -96,68 +121,144 @@ def get_prices(conn: duckdb.DuckDBPyConnection, ticker: str) -> tuple[pd.DataFra
     return fetch_and_store(conn, ticker), "yfinance"
 
 
-def normalize_to_100(prices: pd.DataFrame) -> pd.DataFrame:
-    first_close = prices["close"].iloc[0]
-    if pd.isna(first_close) or first_close == 0:
-        raise ValueError("Cannot normalize to 100: the first close is missing or zero.")
-    out = prices.loc[:, ["date", "close"]].copy()
-    out["close"] = 100 * out["close"] / first_close
-    return out
-
-
-st.set_page_config(page_title="Stock Lenses", layout="wide")
-st.title("Stock Lenses")
-st.caption("Type a ticker. Prices are cached in DuckDB; fresh data is pulled from yfinance.")
-
-with st.form("ticker_form"):
-    ticker_input = st.text_input("Ticker", value="AAPL").strip().upper()
-    submitted = st.form_submit_button("Load", type="primary")
-
-if submitted:
-    if not ticker_input:
-        st.warning("Enter a ticker symbol.")
-    else:
-        try:
-            with get_connection() as conn:
-                with st.spinner(f"Loading {ticker_input}…"):
-                    prices, source = get_prices(conn, ticker_input)
-
-            if prices.empty:
-                st.error(f"No prices available for {ticker_input}.")
-            else:
-                st.session_state["ticker"] = ticker_input
-                st.session_state["prices"] = prices
-                st.session_state["source"] = source
-        except (ValueError, KeyError, OSError, duckdb.Error) as exc:
-            st.error(str(exc))
-
-if "prices" in st.session_state:
-    ticker = st.session_state["ticker"]
-    prices = st.session_state["prices"]
-    source = st.session_state["source"]
-    label = "DuckDB cache" if source == "cache" else "yfinance (fetched & stored)"
-    st.success(f"{ticker}: {len(prices)} daily bars from {label}")
-    normalize = st.checkbox("Normalize to 100")
-    plot_prices = prices
-    chart_title = f"{ticker} close price"
-    y_label = "Close"
-    if normalize:
-        try:
-            plot_prices = normalize_to_100(prices)
-            chart_title = f"{ticker} indexed to 100"
-            y_label = "Indexed to 100"
-        except ValueError as exc:
-            st.error(str(exc))
-            plot_prices = None
-    if plot_prices is not None:
-        fig = px.line(
-            plot_prices,
-            x="date",
-            y="close",
-            title=chart_title,
-            labels={"date": "Date", "close": y_label},
+def basket_history(
+    prices_by_ticker: dict[str, pd.DataFrame], basket: Basket
+) -> pd.DataFrame:
+    if basket.start_value <= 0 or not basket.tickers:
+        raise ValueError(
+            f"{basket.label} needs a positive start value and at least one ticker."
         )
-        fig.update_layout(margin=dict(l=20, r=20, t=50, b=20))
-        st.plotly_chart(fig, use_container_width=True)
-    with st.expander("Raw data"):
-        st.dataframe(prices, use_container_width=True)
+
+    closes: list[pd.Series] = []
+    for ticker in basket.tickers:
+        frame = prices_by_ticker[ticker]
+        if frame.empty or not {"date", "close"}.issubset(frame.columns):
+            raise ValueError(f"No prices for {ticker}.")
+        cleaned = frame.loc[:, ["date", "close"]].dropna(subset=["close"])
+        cleaned = cleaned.drop_duplicates(subset="date", keep="last")
+        cleaned["date"] = pd.to_datetime(cleaned["date"]).dt.normalize()
+        series = cleaned.set_index("date")["close"].astype(float).sort_index()
+        series = series[~series.index.duplicated(keep="last")]
+        if series.empty:
+            raise ValueError(f"No prices for {ticker}.")
+        closes.append(series.rename(ticker))
+
+    aligned = pd.concat(closes, axis=1, join="inner").sort_index().dropna(how="any")
+    if aligned.empty:
+        raise ValueError("These tickers have no dates in common.")
+
+    first = aligned.iloc[0]
+    invalid = first.index[first.isna() | (first <= 0)]
+    if len(invalid):
+        names = ", ".join(str(name) for name in invalid)
+        raise ValueError(
+            "Cannot start the basket. The first close is missing or not positive"
+            f" for {names}."
+        )
+
+    shares = (basket.start_value / len(basket.tickers)) / first
+    history = aligned.div(first, axis=1).mul(100.0)
+    history.insert(0, "dollars", aligned.mul(shares, axis=1).sum(axis=1))
+    history.index.name = "date"
+    return history.reset_index()
+
+
+def basket_figure(history: pd.DataFrame, basket: Basket) -> go.Figure:
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Scatter(
+            x=history["date"],
+            y=history["dollars"],
+            name="Dollar value",
+            line={"width": 3, "color": "#111827"},
+        ),
+        secondary_y=False,
+    )
+    for ticker in basket.tickers:
+        fig.add_trace(
+            go.Scatter(x=history["date"], y=history[ticker], name=ticker),
+            secondary_y=True,
+        )
+    fig.update_layout(
+        title=f"{basket.label}, start ${basket.start_value:,.0f}",
+        margin={"l": 20, "r": 20, "t": 50, "b": 80},
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "top", "y": -0.25, "x": 0},
+    )
+    fig.update_xaxes(title_text="Date")
+    fig.update_yaxes(
+        title_text="Dollars",
+        tickprefix="$",
+        separatethousands=True,
+        secondary_y=False,
+    )
+    fig.update_yaxes(title_text="Indexed to 100", showgrid=False, secondary_y=True)
+    return fig
+
+
+def main() -> None:
+    st.set_page_config(page_title="Stock Lenses", layout="wide")
+    st.title("Stock Lenses")
+    st.caption(
+        "Each basket buys equal dollars of its holdings and keeps those share counts. "
+        "Prices are cached in DuckDB, and missing or stale bars come from yfinance."
+    )
+
+    basket = st.radio(
+        "Basket",
+        options=list(BASKETS.values()),
+        format_func=lambda item: f"{item.label} ({', '.join(item.tickers)})",
+        horizontal=True,
+    )
+
+    try:
+        with get_connection() as conn:
+            with st.spinner(f"Loading {basket.label}..."):
+                prices_by_ticker: dict[str, pd.DataFrame] = {}
+                sources: dict[str, str] = {}
+                for ticker in basket.tickers:
+                    prices, source = get_prices(conn, ticker)
+                    prices_by_ticker[ticker] = prices
+                    sources[ticker] = source
+        history = basket_history(prices_by_ticker, basket)
+    except (ValueError, KeyError, OSError, duckdb.Error) as exc:
+        st.error(str(exc))
+        return
+
+    fetched = [ticker for ticker in basket.tickers if sources[ticker] != "cache"]
+    if not fetched:
+        source_text = "Every ticker came from the DuckDB cache."
+    elif len(fetched) == len(basket.tickers):
+        source_text = "Every ticker was fetched from yfinance and stored in DuckDB."
+    else:
+        source_text = (
+            "Fetched "
+            + ", ".join(fetched)
+            + " from yfinance and stored them in DuckDB. "
+            "The other tickers came from the cache."
+        )
+
+    start_day = pd.Timestamp(history["date"].iloc[0]).date()
+    end_day = pd.Timestamp(history["date"].iloc[-1]).date()
+    start_value = float(history["dollars"].iloc[0])
+    latest_value = float(history["dollars"].iloc[-1])
+    change_pct = (latest_value / start_value - 1.0) * 100.0
+    start_col, latest_col, days_col = st.columns(3)
+    start_col.metric("Start", f"${start_value:,.0f}")
+    latest_col.metric("Latest", f"${latest_value:,.2f}", delta=f"{change_pct:.1f}%")
+    days_col.metric("Common days", f"{len(history)}")
+    st.success(
+        f"{basket.label} from {start_day} to {end_day}. {source_text}"
+    )
+    st.caption(
+        "The left axis is the basket in dollars. "
+        "The right axis is each holding indexed to 100. "
+        "Share counts stay fixed after the first common date."
+    )
+    st.plotly_chart(basket_figure(history, basket), use_container_width=True)
+    with st.expander("Basket series"):
+        st.dataframe(history, use_container_width=True)
+
+
+if __name__ == "__main__":
+    main()

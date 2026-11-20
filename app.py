@@ -96,6 +96,15 @@ def get_prices(conn: duckdb.DuckDBPyConnection, ticker: str) -> tuple[pd.DataFra
     return fetch_and_store(conn, ticker), "yfinance"
 
 
+def normalize_to_100(prices: pd.DataFrame) -> pd.DataFrame:
+    first_close = prices["close"].iloc[0]
+    if pd.isna(first_close) or first_close == 0:
+        raise ValueError("Cannot normalize to 100: the first close is missing or zero.")
+    out = prices.loc[:, ["date", "close"]].copy()
+    out["close"] = 100 * out["close"] / first_close
+    return out
+
+
 st.set_page_config(page_title="Stock Lenses", layout="wide")
 st.title("Stock Lenses")
 st.caption("Type a ticker. Prices are cached in DuckDB; fresh data is pulled from yfinance.")
@@ -116,18 +125,39 @@ if submitted:
             if prices.empty:
                 st.error(f"No prices available for {ticker_input}.")
             else:
-                label = "DuckDB cache" if source == "cache" else "yfinance (fetched & stored)"
-                st.success(f"{ticker_input}: {len(prices)} daily bars from {label}")
-                fig = px.line(
-                    prices,
-                    x="date",
-                    y="close",
-                    title=f"{ticker_input} close price",
-                    labels={"date": "Date", "close": "Close"},
-                )
-                fig.update_layout(margin=dict(l=20, r=20, t=50, b=20))
-                st.plotly_chart(fig, use_container_width=True)
-                with st.expander("Raw data"):
-                    st.dataframe(prices, use_container_width=True)
+                st.session_state["ticker"] = ticker_input
+                st.session_state["prices"] = prices
+                st.session_state["source"] = source
         except (ValueError, KeyError, OSError, duckdb.Error) as exc:
             st.error(str(exc))
+
+if "prices" in st.session_state:
+    ticker = st.session_state["ticker"]
+    prices = st.session_state["prices"]
+    source = st.session_state["source"]
+    label = "DuckDB cache" if source == "cache" else "yfinance (fetched & stored)"
+    st.success(f"{ticker}: {len(prices)} daily bars from {label}")
+    normalize = st.checkbox("Normalize to 100")
+    plot_prices = prices
+    chart_title = f"{ticker} close price"
+    y_label = "Close"
+    if normalize:
+        try:
+            plot_prices = normalize_to_100(prices)
+            chart_title = f"{ticker} indexed to 100"
+            y_label = "Indexed to 100"
+        except ValueError as exc:
+            st.error(str(exc))
+            plot_prices = None
+    if plot_prices is not None:
+        fig = px.line(
+            plot_prices,
+            x="date",
+            y="close",
+            title=chart_title,
+            labels={"date": "Date", "close": y_label},
+        )
+        fig.update_layout(margin=dict(l=20, r=20, t=50, b=20))
+        st.plotly_chart(fig, use_container_width=True)
+    with st.expander("Raw data"):
+        st.dataframe(prices, use_container_width=True)

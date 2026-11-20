@@ -1,5 +1,3 @@
-"""Minimal Streamlit app: ticker lookup with DuckDB cache + yfinance fetch."""
-
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -11,7 +9,6 @@ import yfinance as yf
 
 DATA_DIR = Path("/data")
 DB_PATH = DATA_DIR / "stocks.duckdb"
-# Treat cached data as fresh if the latest bar is within this many calendar days.
 FRESHNESS_DAYS = 3
 HISTORY_PERIOD = "1y"
 
@@ -132,5 +129,5 @@ if submitted:
                 st.plotly_chart(fig, use_container_width=True)
                 with st.expander("Raw data"):
                     st.dataframe(prices, use_container_width=True)
-        except Exception as exc:  # noqa: BLE001 — surface fetch/parse errors in the UI
+        except (ValueError, KeyError, OSError, duckdb.Error) as exc:
             st.error(str(exc))

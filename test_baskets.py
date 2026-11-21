@@ -12,13 +12,16 @@ def prices(rows: list[tuple[object, float]]) -> pd.DataFrame:
 
 class BasketRegistryTest(unittest.TestCase):
     def test_starter_baskets(self) -> None:
-        self.assertEqual(set(BASKETS), {"stocks", "crypto"})
+        self.assertEqual(set(BASKETS), {"stocks", "crypto", "metals"})
         stocks = BASKETS["stocks"]
         crypto = BASKETS["crypto"]
+        metals = BASKETS["metals"]
         self.assertEqual(stocks.tickers, ("AAPL", "MSFT", "GOOGL", "AMZN"))
         self.assertEqual(crypto.tickers, ("BTC-USD", "ETH-USD", "SOL-USD"))
+        self.assertEqual(metals.tickers, ("GC=F", "SI=F", "PL=F"))
         self.assertEqual(stocks.start_value, 10_000.0)
         self.assertEqual(crypto.start_value, 10_000.0)
+        self.assertEqual(metals.start_value, 10_000.0)
 
 
 class BasketHistoryTest(unittest.TestCase):

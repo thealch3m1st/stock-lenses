@@ -36,7 +36,53 @@ BASKETS: dict[str, Basket] = {
         tickers=("BTC-USD", "ETH-USD", "SOL-USD"),
         start_value=10_000.0,
     ),
+    "metals": Basket(
+        key="metals",
+        label="Precious metals",
+        tickers=("GC=F", "SI=F", "PL=F"),
+        start_value=10_000.0,
+    ),
 }
+
+MOBILE_CSS = """
+<style>
+.main .block-container {
+    max-width: 100%;
+    padding-left: 1rem;
+    padding-right: 1rem;
+}
+section.main > div {
+    overflow-x: clip;
+}
+div[data-testid="stMetric"] {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+@media (max-width: 480px) {
+    [data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+        gap: 0.25rem 0 !important;
+    }
+    div[data-testid="column"] {
+        width: 100% !important;
+        flex: 1 1 100% !important;
+        min-width: 0 !important;
+    }
+    div[data-testid="stPlotlyChart"] {
+        overflow-x: hidden;
+    }
+    div[data-testid="stPlotlyChart"] .js-plotly-plot,
+    div[data-testid="stPlotlyChart"] .plotly,
+    div[data-testid="stPlotlyChart"] .main-svg {
+        max-width: 100% !important;
+    }
+}
+</style>
+"""
+
+
+def basket_option_label(item: Basket) -> str:
+    return item.label
 
 
 def get_connection() -> duckdb.DuckDBPyConnection:
@@ -180,36 +226,59 @@ def basket_figure(history: pd.DataFrame, basket: Basket) -> go.Figure:
             secondary_y=True,
         )
     fig.update_layout(
-        title=f"{basket.label}, start ${basket.start_value:,.0f}",
-        margin={"l": 20, "r": 20, "t": 50, "b": 80},
+        title={
+            "text": f"{basket.label}, start ${basket.start_value:,.0f}",
+            "font": {"size": 16},
+        },
+        autosize=True,
+        margin={"l": 4, "r": 4, "t": 56, "b": 88},
         hovermode="x unified",
-        legend={"orientation": "h", "yanchor": "top", "y": -0.25, "x": 0},
+        legend={
+            "orientation": "h",
+            "yanchor": "top",
+            "y": -0.28,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"size": 10},
+            "itemsizing": "constant",
+            "tracegroupgap": 4,
+        },
     )
-    fig.update_xaxes(title_text="Date")
+    fig.update_xaxes(title_text="Date", automargin=True)
     fig.update_yaxes(
         title_text="Dollars",
         tickprefix="$",
         separatethousands=True,
+        automargin=True,
         secondary_y=False,
     )
-    fig.update_yaxes(title_text="Indexed to 100", showgrid=False, secondary_y=True)
+    fig.update_yaxes(
+        title_text="Indexed to 100",
+        title_font_size=11,
+        showgrid=False,
+        automargin=True,
+        secondary_y=True,
+    )
     return fig
 
 
 def main() -> None:
     st.set_page_config(page_title="Stock Lenses", layout="wide")
+    st.markdown(MOBILE_CSS, unsafe_allow_html=True)
     st.title("Stock Lenses")
     st.caption(
         "Each basket buys equal dollars of its holdings and keeps those share counts. "
         "Prices are cached in DuckDB, and missing or stale bars come from yfinance."
     )
 
-    basket = st.radio(
+    basket_keys = list(BASKETS.keys())
+    chosen_key = st.selectbox(
         "Basket",
-        options=list(BASKETS.values()),
-        format_func=lambda item: f"{item.label} ({', '.join(item.tickers)})",
-        horizontal=True,
+        options=basket_keys,
+        format_func=lambda key: basket_option_label(BASKETS[key]),
     )
+    basket = BASKETS[chosen_key]
+    st.caption(f"Holdings: {', '.join(basket.tickers)}")
 
     try:
         with get_connection() as conn:
@@ -255,7 +324,11 @@ def main() -> None:
         "The right axis is each holding indexed to 100. "
         "Share counts stay fixed after the first common date."
     )
-    st.plotly_chart(basket_figure(history, basket), use_container_width=True)
+    st.plotly_chart(
+        basket_figure(history, basket),
+        use_container_width=True,
+        config={"displayModeBar": False, "responsive": True},
+    )
     with st.expander("Basket series"):
         st.dataframe(history, use_container_width=True)
 

@@ -1,6 +1,6 @@
 # Stock Lenses
 
-Streamlit app for two equal-weight baskets. Daily prices are cached in DuckDB on a Docker volume. The app fetches a ticker from yfinance when the cache is missing or the newest bar is older than 3 days.
+Streamlit app for three equal-weight baskets. Daily prices are cached in DuckDB on a Docker volume. The app fetches a ticker from yfinance when the cache is missing or the newest bar is older than 3 days.
 
 ## Run
 
@@ -21,12 +21,14 @@ The `stock-data` volume keeps the DuckDB file across rebuilds.
 ## Switch baskets
 
 1. Open the app.
-2. Under **Basket**, choose **Dollar stocks** or **Crypto**.
+2. Under **Basket**, choose **Dollar stocks**, **Crypto**, or **Precious metals**.
 3. Read the chart.
 
-**Dollar stocks** holds AAPL, MSFT, GOOGL, and AMZN. **Crypto** holds BTC-USD, ETH-USD, and SOL-USD. Each basket starts at $10,000. On the first date present for every holding, the app buys an equal dollar amount of each and keeps those share counts.
+**Dollar stocks** holds AAPL, MSFT, GOOGL, and AMZN. **Crypto** holds BTC-USD, ETH-USD, and SOL-USD. **Precious metals** holds COMEX futures GC=F (gold), SI=F (silver), and PL=F (platinum). Each basket starts at $10,000. On the first date present for every holding, the app buys an equal dollar amount of each and keeps those share counts.
 
 The left axis is the basket's dollar value. The right axis is each holding indexed to 100 on that same first date.
+
+On a phone, use the **Basket** dropdown instead of side-by-side chips. Metrics stack in a single column near 390px width, and the chart fits the screen width with a compact legend under the plot.
 
 ## Price cache
 

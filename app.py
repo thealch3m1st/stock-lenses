@@ -186,9 +186,9 @@ def align_closes(
     return aligned
 
 
-def basket_shares(
+def _aligned_equal_weight_book(
     prices_by_ticker: dict[str, pd.DataFrame], basket: Basket
-) -> dict[str, float]:
+) -> tuple[pd.DataFrame, pd.Series]:
     if basket.start_value <= 0 or not basket.tickers:
         raise ValueError(
             f"{basket.label} needs a positive start value and at least one ticker."
@@ -202,31 +202,23 @@ def basket_shares(
             "Cannot start the basket. The first close is missing or not positive"
             f" for {names}."
         )
-    per_ticker = (basket.start_value / len(basket.tickers)) / first
-    return {str(ticker): float(per_ticker[ticker]) for ticker in basket.tickers}
+    shares = (basket.start_value / len(basket.tickers)) / first
+    return aligned, shares
+
+
+def basket_shares(
+    prices_by_ticker: dict[str, pd.DataFrame], basket: Basket
+) -> dict[str, float]:
+    _, shares = _aligned_equal_weight_book(prices_by_ticker, basket)
+    return {str(ticker): float(shares[ticker]) for ticker in basket.tickers}
 
 
 def basket_history(
     prices_by_ticker: dict[str, pd.DataFrame], basket: Basket
 ) -> pd.DataFrame:
-    if basket.start_value <= 0 or not basket.tickers:
-        raise ValueError(
-            f"{basket.label} needs a positive start value and at least one ticker."
-        )
-
-    aligned = align_closes(prices_by_ticker, basket.tickers)
-    first = aligned.iloc[0]
-    invalid = first.index[first.isna() | (first <= 0)]
-    if len(invalid):
-        names = ", ".join(str(name) for name in invalid)
-        raise ValueError(
-            "Cannot start the basket. The first close is missing or not positive"
-            f" for {names}."
-        )
-
-    shares = (basket.start_value / len(basket.tickers)) / first
+    aligned, shares = _aligned_equal_weight_book(prices_by_ticker, basket)
     dollars_by_ticker = aligned.mul(shares, axis=1)
-    history = aligned.div(first, axis=1).mul(100.0)
+    history = aligned.div(aligned.iloc[0], axis=1).mul(100.0)
     history.insert(0, "dollars", dollars_by_ticker.sum(axis=1))
     for ticker in basket.tickers:
         history[f"{ticker}_dollars"] = dollars_by_ticker[ticker]
@@ -242,15 +234,11 @@ PLOTLY_CONFIG = {
     "responsive": True,
     "modeBarButtonsToRemove": ["lasso2d", "select2d"],
 }
-
-
-def _apply_chart_revision(fig: go.Figure, uirevision: str) -> go.Figure:
-    fig.update_layout(uirevision=uirevision)
-    return fig
+LOCK_INDEXED_Y_ON_OVERVIEW = True
 
 
 def basket_figure(
-    history: pd.DataFrame, basket: Basket, *, uirevision: str = "basket-0"
+    history: pd.DataFrame, basket: Basket, *, chart_id: str = "basket-0"
 ) -> go.Figure:
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
@@ -272,6 +260,7 @@ def basket_figure(
             "text": f"{basket.label}, start ${basket.start_value:,.0f}",
             "font": {"size": 16},
         },
+        uirevision=chart_id,
         autosize=True,
         margin={"l": 4, "r": 4, "t": 56, "b": 88},
         hovermode="x unified",
@@ -301,10 +290,10 @@ def basket_figure(
         title_font_size=11,
         showgrid=False,
         automargin=True,
-        fixedrange=True,
+        fixedrange=LOCK_INDEXED_Y_ON_OVERVIEW,
         secondary_y=True,
     )
-    return _apply_chart_revision(fig, uirevision)
+    return fig
 
 
 def holding_dollar_figure(
@@ -312,7 +301,7 @@ def holding_dollar_figure(
     basket: Basket,
     ticker: str,
     *,
-    uirevision: str = "holding-0",
+    chart_id: str = "holding-0",
 ) -> go.Figure:
     col = f"{ticker}_dollars"
     if col not in history.columns:
@@ -342,6 +331,7 @@ def holding_dollar_figure(
             "text": f"{ticker} sleeve vs basket, equal-weight shares",
             "font": {"size": 16},
         },
+        uirevision=chart_id,
         autosize=True,
         margin={"l": 4, "r": 4, "t": 56, "b": 72},
         hovermode="x unified",
@@ -372,7 +362,7 @@ def holding_dollar_figure(
         showarrow=False,
         font={"size": 11, "color": "#4b5563"},
     )
-    return _apply_chart_revision(fig, uirevision)
+    return fig
 
 
 def main() -> None:
@@ -440,41 +430,32 @@ def main() -> None:
         options=("Basket overview", "Selected holding (dollars)"),
         horizontal=False,
     )
-    selected_ticker = basket.tickers[0]
-    if chart_mode == "Selected holding (dollars)":
+    reset_col, _ = st.columns([1, 3])
+    if reset_col.button("Reset chart view", use_container_width=True):
+        st.session_state.chart_revision += 1
+
+    chart_id = f"{chosen_key}-{chart_mode}-{st.session_state.chart_revision}"
+    if chart_mode == "Basket overview":
+        st.caption(
+            "Dollars on the left, holdings indexed to 100 on the right. "
+            "Use Reset chart view if the axes look wrong."
+        )
+        fig = basket_figure(history, basket, chart_id=chart_id)
+    else:
         selected_ticker = st.selectbox("Holding", options=list(basket.tickers))
         shares = basket_shares(prices_by_ticker, basket)
         st.caption(
             f"Fixed shares for {selected_ticker}: {shares[selected_ticker]:,.4f}. "
             f"Dollar value is shares times daily close."
         )
-
-    reset_col, _ = st.columns([1, 3])
-    if reset_col.button("Reset chart view", use_container_width=True):
-        st.session_state.chart_revision += 1
-
-    rev = f"{chosen_key}-{chart_mode}-{st.session_state.chart_revision}"
-    st.caption(
-        "The left axis is the basket in dollars. "
-        "The right axis is each holding indexed to 100. "
-        "Share counts stay fixed after the first common date. "
-        "Pinch zoom is off so mobile panes do not trap a bad dual-axis range. "
-        "Use Reset chart view to snap axes back."
-        if chart_mode == "Basket overview"
-        else "This path reprices one basket sleeve in dollars beside the full "
-        "basket total, using the same equal-weight share count."
-    )
-    if chart_mode == "Basket overview":
-        fig = basket_figure(history, basket, uirevision=rev)
-    else:
         fig = holding_dollar_figure(
-            history, basket, selected_ticker, uirevision=rev
+            history, basket, selected_ticker, chart_id=chart_id
         )
     st.plotly_chart(
         fig,
         use_container_width=True,
         config=PLOTLY_CONFIG,
-        key=f"plot-{rev}",
+        key=chart_id,
     )
     with st.expander("Basket series"):
         st.dataframe(history, use_container_width=True)

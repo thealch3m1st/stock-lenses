@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Literal
 
 import duckdb
 import pandas as pd
@@ -311,6 +312,161 @@ def parallel_sleeves_dollars(
     }
 
 
+DEFAULT_YARDSTICK_SUBJECTS: tuple[str, ...] = ("AAPL", "MSFT", "GOOGL")
+YARDSTICK_SUBJECTS_STATE_KEY = "yardstick_subjects"
+YardstickKey = Literal["usd", "metals", "crypto"]
+YARDSTICK_KEYS: tuple[YardstickKey, ...] = ("usd", "metals", "crypto")
+
+
+def index_to_100(series: pd.Series) -> pd.Series:
+    first = float(series.iloc[0])
+    if first <= 0 or pd.isna(first):
+        raise ValueError("Cannot index series with a non-positive starting value.")
+    return series.astype(float) / first * 100.0
+
+
+def relative_index(subject: pd.Series, yardstick_dollars: pd.Series) -> pd.Series:
+    s0 = float(subject.iloc[0])
+    y0 = float(yardstick_dollars.iloc[0])
+    if s0 <= 0 or y0 <= 0:
+        raise ValueError("Subject and yardstick need positive starting values.")
+    subject_ratio = subject.astype(float) / s0
+    yardstick_ratio = yardstick_dollars.astype(float) / y0
+    return subject_ratio.div(yardstick_ratio) * 100.0
+
+
+def yardstick_dollar_series(
+    prices_by_ticker: dict[str, pd.DataFrame], basket: Basket
+) -> pd.Series:
+    history = basket_history(prices_by_ticker, basket)
+    dates = pd.to_datetime(history["date"]).dt.normalize()
+    return pd.Series(history["dollars"].values, index=dates, name="yardstick_dollars")
+
+
+def yardstick_lens_frame(
+    prices_by_ticker: dict[str, pd.DataFrame],
+    subject_tickers: tuple[str, ...],
+    *,
+    lens: YardstickKey,
+) -> pd.DataFrame:
+    if not subject_tickers:
+        raise ValueError("Choose at least one subject ticker.")
+    if lens not in YARDSTICK_KEYS:
+        raise ValueError(f"Unknown yardstick lens '{lens}'.")
+
+    aligned_subjects = align_closes(prices_by_ticker, subject_tickers)
+    if lens == "usd":
+        frame = aligned_subjects.copy()
+        frame["yardstick"] = 100.0
+        for ticker in subject_tickers:
+            frame[ticker] = index_to_100(aligned_subjects[ticker])
+        frame.index.name = "date"
+        return frame.reset_index()
+
+    basket = BASKETS[lens]
+    yardstick = yardstick_dollar_series(prices_by_ticker, basket)
+    merged = aligned_subjects.join(yardstick, how="inner")
+    if merged.empty:
+        raise ValueError(
+            f"Subjects and the {basket.label} yardstick have no common trading days."
+        )
+    yard = merged["yardstick_dollars"]
+    frame = pd.DataFrame(index=merged.index)
+    frame["yardstick"] = index_to_100(yard)
+    for ticker in subject_tickers:
+        frame[ticker] = relative_index(merged[ticker], yard)
+    frame.index.name = "date"
+    return frame.reset_index()
+
+
+def lens_return_pct(series: pd.Series) -> float:
+    start = float(series.iloc[0])
+    end = float(series.iloc[-1])
+    if start == 0:
+        raise ValueError("Cannot compute return from a zero start.")
+    return (end / start - 1.0) * 100.0
+
+
+def yardstick_returns_table(
+    prices_by_ticker: dict[str, pd.DataFrame],
+    subject_tickers: tuple[str, ...],
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    usd_frame = yardstick_lens_frame(prices_by_ticker, subject_tickers, lens="usd")
+    metals_frame = yardstick_lens_frame(
+        prices_by_ticker, subject_tickers, lens="metals"
+    )
+    crypto_frame = yardstick_lens_frame(
+        prices_by_ticker, subject_tickers, lens="crypto"
+    )
+    for ticker in subject_tickers:
+        rows.append(
+            {
+                "Ticker": ticker,
+                "USD (%)": lens_return_pct(usd_frame[ticker]),
+                "vs metals (%)": lens_return_pct(metals_frame[ticker]),
+                "vs crypto (%)": lens_return_pct(crypto_frame[ticker]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def yardstick_figure(
+    frame: pd.DataFrame,
+    subject_tickers: tuple[str, ...],
+    *,
+    lens_label: str,
+    chart_id: str = "yardstick-0",
+) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=frame["date"],
+            y=frame["yardstick"],
+            name=f"{lens_label} yardstick",
+            line={"width": 3, "color": "#6b7280", "dash": "dash"},
+        )
+    )
+    palette = ("#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed", "#0891b2")
+    for idx, ticker in enumerate(subject_tickers):
+        fig.add_trace(
+            go.Scatter(
+                x=frame["date"],
+                y=frame[ticker],
+                name=ticker,
+                line={"width": 2, "color": palette[idx % len(palette)]},
+            )
+        )
+    fig.update_layout(
+        title={
+            "text": f"Subjects vs {lens_label} yardstick (start = 100)",
+            "font": {"size": 16},
+        },
+        uirevision=chart_id,
+        autosize=True,
+        margin={"l": 4, "r": 4, "t": 56, "b": 88},
+        hovermode="x unified",
+        dragmode="pan",
+        legend={
+            "orientation": "h",
+            "yanchor": "top",
+            "y": -0.28,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"size": 10},
+            "itemsizing": "constant",
+            "tracegroupgap": 4,
+        },
+    )
+    fig.update_xaxes(title_text="Date", automargin=True, fixedrange=False)
+    fig.update_yaxes(
+        title_text="Relative index (100 = start)",
+        automargin=True,
+        fixedrange=LOCK_INDEXED_Y_ON_OVERVIEW,
+    )
+    return fig
+
+
 PLOTLY_CONFIG = {
     "displayModeBar": "hover",
     "displaylogo": False,
@@ -605,15 +761,123 @@ def holding_dollar_figure(
     return fig
 
 
-def main() -> None:
-    st.set_page_config(page_title="Stock Lenses", layout="wide")
-    st.markdown(MOBILE_CSS, unsafe_allow_html=True)
-    st.title("Stock Lenses")
-    st.caption(
-        "Each basket buys equal dollars of its holdings and keeps those share counts. "
-        "Prices are cached in DuckDB, and missing or stale bars come from yfinance."
+YARDSTICK_LENS_LABELS: dict[YardstickKey, str] = {
+    "usd": "USD",
+    "metals": BASKETS["metals"].label,
+    "crypto": BASKETS["crypto"].label,
+}
+
+
+def render_yardstick_lenses(conn: duckdb.DuckDBPyConnection) -> None:
+    if YARDSTICK_SUBJECTS_STATE_KEY not in st.session_state:
+        st.session_state[YARDSTICK_SUBJECTS_STATE_KEY] = list(
+            DEFAULT_YARDSTICK_SUBJECTS
+        )
+
+    st.subheader("Yardstick lenses")
+
+    subjects = tuple(
+        dict.fromkeys(t.upper() for t in st.session_state[YARDSTICK_SUBJECTS_STATE_KEY])
+    )
+    with st.expander("Subject tickers", expanded=not subjects):
+        with st.form("yardstick_subjects_form", clear_on_submit=True):
+            draft = st.text_input(
+                "Add tickers",
+                placeholder="NVDA or comma-separated list",
+            )
+            if st.form_submit_button("Set subjects"):
+                parsed = parse_ticker_input(draft)
+                if parsed:
+                    st.session_state[YARDSTICK_SUBJECTS_STATE_KEY] = parsed
+                    st.rerun()
+                elif draft.strip():
+                    st.session_state[YARDSTICK_SUBJECTS_STATE_KEY] = [
+                        draft.strip().upper()
+                    ]
+                    st.rerun()
+                else:
+                    st.session_state[YARDSTICK_SUBJECTS_STATE_KEY] = list(
+                        DEFAULT_YARDSTICK_SUBJECTS
+                    )
+                    st.rerun()
+        if subjects:
+            st.markdown("**Current subjects:** " + ", ".join(subjects))
+        else:
+            st.warning("Add at least one subject ticker.")
+
+    if not subjects:
+        return
+
+    yardstick_tickers = tuple(
+        dict.fromkeys(
+            (
+                *subjects,
+                *BASKETS["metals"].tickers,
+                *BASKETS["crypto"].tickers,
+            )
+        )
     )
 
+    try:
+        with st.spinner("Loading yardstick prices..."):
+            prices_by_ticker: dict[str, pd.DataFrame] = {}
+            for ticker in yardstick_tickers:
+                prices, _source = get_prices(conn, ticker)
+                prices_by_ticker[ticker] = prices
+        returns_df = yardstick_returns_table(prices_by_ticker, subjects)
+    except (ValueError, KeyError, OSError, duckdb.Error) as exc:
+        st.error(str(exc))
+        return
+
+    st.markdown("**Returns (start → latest)**")
+    st.dataframe(
+        returns_df.style.format(
+            {
+                "USD (%)": "{:+.1f}",
+                "vs metals (%)": "{:+.1f}",
+                "vs crypto (%)": "{:+.1f}",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    lens: YardstickKey = st.radio(
+        "Chart lens",
+        options=list(YARDSTICK_KEYS),
+        format_func=lambda key: YARDSTICK_LENS_LABELS[key],
+        horizontal=False,
+    )
+    if "yardstick_chart_revision" not in st.session_state:
+        st.session_state.yardstick_chart_revision = 0
+    reset_col, _ = st.columns([1, 3])
+    if reset_col.button("Reset yardstick chart", use_container_width=True):
+        st.session_state.yardstick_chart_revision += 1
+
+    try:
+        frame = yardstick_lens_frame(prices_by_ticker, subjects, lens=lens)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    chart_id = f"yardstick-{lens}-{st.session_state.yardstick_chart_revision}"
+    fig = yardstick_figure(
+        frame,
+        subjects,
+        lens_label=YARDSTICK_LENS_LABELS[lens],
+        chart_id=chart_id,
+    )
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config=PLOTLY_CONFIG,
+        key=chart_id,
+    )
+    with st.expander("Lens series"):
+        st.dataframe(frame, use_container_width=True)
+
+
+def render_basket_book(conn: duckdb.DuckDBPyConnection) -> None:
     basket_keys = list(BASKETS.keys())
     chosen_key = st.selectbox(
         "Basket",
@@ -684,14 +948,13 @@ def main() -> None:
     tickers_to_load = tuple(dict.fromkeys((*basket.tickers, *extra_tickers)))
 
     try:
-        with get_connection() as conn:
-            with st.spinner(f"Loading {basket.label}..."):
-                prices_by_ticker: dict[str, pd.DataFrame] = {}
-                sources: dict[str, str] = {}
-                for ticker in tickers_to_load:
-                    prices, source = get_prices(conn, ticker)
-                    prices_by_ticker[ticker] = prices
-                    sources[ticker] = source
+        with st.spinner(f"Loading {basket.label}..."):
+            prices_by_ticker: dict[str, pd.DataFrame] = {}
+            sources: dict[str, str] = {}
+            for ticker in tickers_to_load:
+                prices, source = get_prices(conn, ticker)
+                prices_by_ticker[ticker] = prices
+                sources[ticker] = source
         history = basket_history(prices_by_ticker, basket)
         extra_sleeves = parallel_sleeves_dollars(
             prices_by_ticker, basket, extra_tickers
@@ -844,6 +1107,31 @@ def main() -> None:
     )
     with st.expander("Basket series"):
         st.dataframe(history, use_container_width=True)
+
+
+def main() -> None:
+    st.set_page_config(page_title="Stock Lenses", layout="wide")
+    st.markdown(MOBILE_CSS, unsafe_allow_html=True)
+    st.title("Stock Lenses")
+    st.caption(
+        "Equal-weight dollar baskets, or the same stocks repriced against metals "
+        "and crypto yardsticks. Prices are cached in DuckDB; stale bars come from "
+        "yfinance."
+    )
+
+    app_view = st.radio(
+        "View",
+        options=("Basket books", "Yardstick lenses"),
+        horizontal=False,
+    )
+    try:
+        with get_connection() as conn:
+            if app_view == "Yardstick lenses":
+                render_yardstick_lenses(conn)
+            else:
+                render_basket_book(conn)
+    except OSError as exc:
+        st.error(str(exc))
 
 
 if __name__ == "__main__":

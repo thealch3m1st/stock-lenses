@@ -8,11 +8,14 @@ from app import (
     Basket,
     basket_history,
     basket_shares,
+    index_to_100,
     normalize_extra_tickers,
     parallel_sleeve_dollars,
     parallel_sleeve_shares,
     parse_ticker_input,
+    relative_index,
     starter_slot_dollars,
+    yardstick_lens_frame,
 )
 
 
@@ -154,6 +157,59 @@ class BasketHistoryTest(unittest.TestCase):
             ).abs().max()
             < 1e-9
         )
+
+
+class YardstickMathTest(unittest.TestCase):
+    def test_index_to_100_starts_at_100(self) -> None:
+        series = pd.Series([50.0, 75.0, 100.0])
+        indexed = index_to_100(series)
+        self.assertAlmostEqual(indexed.iloc[0], 100.0)
+        self.assertAlmostEqual(indexed.iloc[1], 150.0)
+        self.assertAlmostEqual(indexed.iloc[2], 200.0)
+
+    def test_usd_lens_matches_dollar_index(self) -> None:
+        frames = {
+            "AAA": prices([(date(2024, 1, 1), 100.0), (date(2024, 1, 2), 110.0)]),
+            "BBB": prices([(date(2024, 1, 1), 200.0), (date(2024, 1, 2), 180.0)]),
+        }
+        lens = yardstick_lens_frame(frames, ("AAA", "BBB"), lens="usd")
+        self.assertAlmostEqual(lens["yardstick"].iloc[0], 100.0)
+        self.assertTrue((lens["yardstick"] == 100.0).all())
+        self.assertAlmostEqual(lens["AAA"].iloc[1], 110.0)
+        self.assertAlmostEqual(lens["BBB"].iloc[1], 90.0)
+
+    def test_relative_index_when_yardstick_flat(self) -> None:
+        subject = pd.Series([10.0, 15.0, 20.0])
+        yardstick = pd.Series([1_000.0, 1_000.0, 1_000.0])
+        rel = relative_index(subject, yardstick)
+        self.assertAlmostEqual(rel.iloc[0], 100.0)
+        self.assertAlmostEqual(rel.iloc[1], 150.0)
+        self.assertAlmostEqual(rel.iloc[2], 200.0)
+
+    def test_relative_index_outpaces_yardstick(self) -> None:
+        subject = pd.Series([100.0, 150.0])
+        yardstick = pd.Series([100.0, 125.0])
+        rel = relative_index(subject, yardstick)
+        self.assertAlmostEqual(rel.iloc[0], 100.0)
+        self.assertAlmostEqual(rel.iloc[1], 120.0)
+
+    def test_metals_yardstick_starts_at_100(self) -> None:
+        metals = BASKETS["metals"]
+        frames = {
+            ticker: prices(
+                [
+                    (date(2024, 1, 1), 100.0 + i),
+                    (date(2024, 1, 2), 110.0 + i),
+                ]
+            )
+            for i, ticker in enumerate(metals.tickers)
+        }
+        frames["SUBJ"] = prices(
+            [(date(2024, 1, 1), 50.0), (date(2024, 1, 2), 55.0)]
+        )
+        lens = yardstick_lens_frame(frames, ("SUBJ",), lens="metals")
+        self.assertAlmostEqual(lens["yardstick"].iloc[0], 100.0)
+        self.assertGreater(lens["yardstick"].iloc[1], 100.0)
 
 
 class ParallelSleeveTest(unittest.TestCase):

@@ -25,6 +25,16 @@ docker run --rm -v "$PWD":/workspace -w /workspace python:3.12-slim \
   sh -c "pip install -q -r requirements.txt && python -m unittest test_baskets -v"
 ```
 
+## Yardstick lenses
+
+Under **View**, choose **Yardstick lenses** to reprice the same stocks in three units at once.
+
+1. Default subjects are AAPL, MSFT, and GOOGL. Use **Subject tickers** to replace the list.
+2. The returns table shows percent change vs USD (plain close index), vs the precious-metals equal-weight basket, and vs the crypto equal-weight basket.
+3. Pick **Chart lens** to plot subjects against the yardstick for USD, metals, or crypto. The dashed line is the yardstick basket indexed to 100 on the first common day.
+
+Relative index on day *t* is `100 × (S_t/S_0) ÷ (Y_t/Y_0)`, where *Y* is the yardstick basket’s dollar path from `basket_history`. USD uses a flat yardstick at 100, so the subject line is the usual dollar index.
+
 ## Switch baskets
 
 1. Open the app.

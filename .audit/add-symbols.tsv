@@ -1,0 +1,4 @@
+ts	check	result	notes
+2026-11-21T00:45:24Z	unittest	PASS	13 tests
+2026-11-21T00:45:24Z	nvda_sleeve	PASS	slot=2500 basket=10000 source=cache
+2026-11-21T00:45:24Z	browser_add_nvda	PASS	Added symbols + Compare adds mode

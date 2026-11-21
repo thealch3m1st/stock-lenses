@@ -3,7 +3,17 @@ from datetime import date
 
 import pandas as pd
 
-from app import BASKETS, Basket, basket_history, basket_shares
+from app import (
+    BASKETS,
+    Basket,
+    basket_history,
+    basket_shares,
+    normalize_extra_tickers,
+    parallel_sleeve_dollars,
+    parallel_sleeve_shares,
+    parse_ticker_input,
+    starter_slot_dollars,
+)
 
 
 def prices(rows: list[tuple[object, float]]) -> pd.DataFrame:
@@ -22,6 +32,20 @@ class BasketRegistryTest(unittest.TestCase):
         self.assertEqual(stocks.start_value, 10_000.0)
         self.assertEqual(crypto.start_value, 10_000.0)
         self.assertEqual(metals.start_value, 10_000.0)
+
+
+class ExtraTickerHelpersTest(unittest.TestCase):
+    def test_parse_ticker_input_splits_and_uppercases(self) -> None:
+        self.assertEqual(parse_ticker_input(" nvda, tsla "), ["NVDA", "TSLA"])
+
+    def test_normalize_extra_tickers_dedupes_and_skips_starter(self) -> None:
+        starter = ("AAA", "BBB")
+        extras = ("aaa", "CCC", "CCC", "BBB", "ddd")
+        self.assertEqual(normalize_extra_tickers(starter, extras), ("CCC", "DDD"))
+
+    def test_starter_slot_dollars(self) -> None:
+        basket = Basket("t", "Test", ("A", "B", "C", "D"), 10_000.0)
+        self.assertAlmostEqual(starter_slot_dollars(basket), 2_500.0)
 
 
 class BasketHistoryTest(unittest.TestCase):
@@ -130,6 +154,74 @@ class BasketHistoryTest(unittest.TestCase):
             ).abs().max()
             < 1e-9
         )
+
+
+class ParallelSleeveTest(unittest.TestCase):
+    def test_parallel_sleeve_starts_at_one_starter_slot(self) -> None:
+        basket = Basket("t", "Test", ("AAA", "BBB"), 10_000.0)
+        frames = {
+            "AAA": prices(
+                [
+                    (date(2024, 1, 1), 10.0),
+                    (date(2024, 1, 2), 12.0),
+                ]
+            ),
+            "BBB": prices(
+                [
+                    (date(2024, 1, 1), 50.0),
+                    (date(2024, 1, 2), 50.0),
+                ]
+            ),
+            "CCC": prices(
+                [
+                    (date(2024, 1, 1), 25.0),
+                    (date(2024, 1, 2), 30.0),
+                ]
+            ),
+        }
+        history = basket_history(frames, basket)
+        sleeve = parallel_sleeve_dollars(frames, basket, "CCC")
+        slot = starter_slot_dollars(basket)
+        self.assertAlmostEqual(sleeve["dollars"].iloc[0], slot)
+        self.assertAlmostEqual(sleeve["dollars"].iloc[1], slot * 30.0 / 25.0)
+        self.assertEqual(len(sleeve), len(history))
+
+    def test_added_ticker_does_not_change_basket_book(self) -> None:
+        basket = Basket("t", "Test", ("AAA", "BBB"), 10_000.0)
+        starter_only = {
+            "AAA": prices([(date(2024, 1, 1), 10.0), (date(2024, 1, 2), 12.0)]),
+            "BBB": prices([(date(2024, 1, 1), 50.0), (date(2024, 1, 2), 50.0)]),
+        }
+        with_extra = {
+            **starter_only,
+            "CCC": prices([(date(2024, 1, 1), 25.0), (date(2024, 1, 2), 30.0)]),
+        }
+        base = basket_history(starter_only, basket)
+        unchanged = basket_history(with_extra, basket)
+        pd.testing.assert_frame_equal(
+            base[["date", "dollars", "AAA", "BBB"]],
+            unchanged[["date", "dollars", "AAA", "BBB"]],
+        )
+
+    def test_parallel_shares_use_slot_not_full_book(self) -> None:
+        basket = Basket("t", "Test", ("AAA", "BBB"), 10_000.0)
+        frames = {
+            "AAA": prices([(date(2024, 1, 1), 10.0)]),
+            "BBB": prices([(date(2024, 1, 1), 50.0)]),
+            "CCC": prices([(date(2024, 1, 1), 25.0)]),
+        }
+        shares, _ = parallel_sleeve_shares(frames, basket, "CCC")
+        self.assertAlmostEqual(shares, 200.0)
+
+    def test_extra_without_starter_overlap_raises(self) -> None:
+        basket = Basket("t", "Test", ("AAA", "BBB"), 10_000.0)
+        frames = {
+            "AAA": prices([(date(2024, 1, 1), 10.0)]),
+            "BBB": prices([(date(2024, 1, 1), 50.0)]),
+            "CCC": prices([(date(2024, 1, 2), 25.0)]),
+        }
+        with self.assertRaises(ValueError):
+            parallel_sleeve_dollars(frames, basket, "CCC")
 
 
 if __name__ == "__main__":

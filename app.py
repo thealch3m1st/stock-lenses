@@ -23,6 +23,45 @@ class Basket:
     start_value: float
 
 
+EXTRAS_STATE_PREFIX = "basket_extras_"
+
+
+def extras_state_key(basket_key: str) -> str:
+    return f"{EXTRAS_STATE_PREFIX}{basket_key}"
+
+
+def parse_ticker_input(raw: str) -> list[str]:
+    tickers: list[str] = []
+    for piece in raw.replace(",", " ").split():
+        cleaned = piece.strip().upper()
+        if cleaned:
+            tickers.append(cleaned)
+    return tickers
+
+
+def normalize_extra_tickers(
+    starter: tuple[str, ...], extras: tuple[str, ...] | list[str]
+) -> tuple[str, ...]:
+    starter_set = {t.upper() for t in starter}
+    seen: set[str] = set()
+    merged: list[str] = []
+    for ticker in extras:
+        cleaned = ticker.strip().upper()
+        if not cleaned or cleaned in starter_set or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        merged.append(cleaned)
+    return tuple(merged)
+
+
+def starter_slot_dollars(basket: Basket) -> float:
+    if basket.start_value <= 0 or not basket.tickers:
+        raise ValueError(
+            f"{basket.label} needs a positive start value and at least one ticker."
+        )
+    return basket.start_value / len(basket.tickers)
+
+
 BASKETS: dict[str, Basket] = {
     "stocks": Basket(
         key="stocks",
@@ -189,10 +228,7 @@ def align_closes(
 def _aligned_equal_weight_book(
     prices_by_ticker: dict[str, pd.DataFrame], basket: Basket
 ) -> tuple[pd.DataFrame, pd.Series]:
-    if basket.start_value <= 0 or not basket.tickers:
-        raise ValueError(
-            f"{basket.label} needs a positive start value and at least one ticker."
-        )
+    slot = starter_slot_dollars(basket)
     aligned = align_closes(prices_by_ticker, basket.tickers)
     first = aligned.iloc[0]
     invalid = first.index[first.isna() | (first <= 0)]
@@ -202,7 +238,7 @@ def _aligned_equal_weight_book(
             "Cannot start the basket. The first close is missing or not positive"
             f" for {names}."
         )
-    shares = (basket.start_value / len(basket.tickers)) / first
+    shares = slot / first
     return aligned, shares
 
 
@@ -224,6 +260,55 @@ def basket_history(
         history[f"{ticker}_dollars"] = dollars_by_ticker[ticker]
     history.index.name = "date"
     return history.reset_index()
+
+
+def parallel_sleeve_shares(
+    prices_by_ticker: dict[str, pd.DataFrame],
+    basket: Basket,
+    extra_ticker: str,
+) -> tuple[float, pd.Series]:
+    if extra_ticker not in prices_by_ticker:
+        raise ValueError(f"No prices for {extra_ticker}.")
+    try:
+        aligned = align_closes(
+            prices_by_ticker, (*basket.tickers, extra_ticker)
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"{extra_ticker} has no closes on the basket's common trading days."
+        ) from exc
+    extra = aligned[extra_ticker]
+    first_close = float(extra.iloc[0])
+    if first_close <= 0:
+        raise ValueError(
+            f"Cannot price {extra_ticker}. The first aligned close is not positive."
+        )
+    shares = starter_slot_dollars(basket) / first_close
+    return shares, extra
+
+
+def parallel_sleeve_dollars(
+    prices_by_ticker: dict[str, pd.DataFrame],
+    basket: Basket,
+    extra_ticker: str,
+) -> pd.DataFrame:
+    shares, closes = parallel_sleeve_shares(prices_by_ticker, basket, extra_ticker)
+    dollars = closes * shares
+    frame = dollars.rename("dollars").reset_index()
+    frame.insert(1, "ticker", extra_ticker)
+    frame["shares"] = shares
+    return frame
+
+
+def parallel_sleeves_dollars(
+    prices_by_ticker: dict[str, pd.DataFrame],
+    basket: Basket,
+    extra_tickers: tuple[str, ...],
+) -> dict[str, pd.DataFrame]:
+    return {
+        ticker: parallel_sleeve_dollars(prices_by_ticker, basket, ticker)
+        for ticker in extra_tickers
+    }
 
 
 PLOTLY_CONFIG = {
@@ -292,6 +377,161 @@ def basket_figure(
         automargin=True,
         fixedrange=LOCK_INDEXED_Y_ON_OVERVIEW,
         secondary_y=True,
+    )
+    return fig
+
+
+def basket_dollars_figure(
+    history: pd.DataFrame, basket: Basket, *, chart_id: str = "basket-dollars-0"
+) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=history["date"],
+            y=history["dollars"],
+            name="Basket dollars",
+            line={"width": 3, "color": "#111827"},
+        )
+    )
+    for ticker in basket.tickers:
+        col = f"{ticker}_dollars"
+        if col not in history.columns:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=history["date"],
+                y=history[col],
+                name=f"{ticker} sleeve",
+                line={"width": 1.5},
+            )
+        )
+    fig.update_layout(
+        title={
+            "text": f"{basket.label} starter sleeves, start ${basket.start_value:,.0f}",
+            "font": {"size": 16},
+        },
+        uirevision=chart_id,
+        autosize=True,
+        margin={"l": 4, "r": 4, "t": 56, "b": 88},
+        hovermode="x unified",
+        dragmode="pan",
+        legend={
+            "orientation": "h",
+            "yanchor": "top",
+            "y": -0.28,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"size": 10},
+            "itemsizing": "constant",
+            "tracegroupgap": 4,
+        },
+    )
+    fig.update_xaxes(title_text="Date", automargin=True, fixedrange=False)
+    fig.update_yaxes(
+        title_text="Dollars",
+        tickprefix="$",
+        separatethousands=True,
+        automargin=True,
+        fixedrange=False,
+    )
+    return fig
+
+
+def basket_figure_with_extras(
+    history: pd.DataFrame,
+    basket: Basket,
+    extra_sleeves: dict[str, pd.DataFrame],
+    *,
+    chart_id: str = "basket-extras-0",
+) -> go.Figure:
+    fig = basket_figure(history, basket, chart_id=chart_id)
+    for ticker, sleeve in extra_sleeves.items():
+        fig.add_trace(
+            go.Scatter(
+                x=sleeve["date"],
+                y=sleeve["dollars"],
+                name=f"{ticker} (added)",
+                line={"width": 2, "dash": "dot"},
+            ),
+            secondary_y=False,
+        )
+    slots = starter_slot_dollars(basket)
+    title = f"{basket.label}, start ${basket.start_value:,.0f}"
+    if extra_sleeves:
+        title += f" · adds at ${slots:,.0f} slot"
+    fig.update_layout(title={"text": title, "font": {"size": 16}})
+    return fig
+
+
+def compare_extras_figure(
+    history: pd.DataFrame,
+    basket: Basket,
+    extra_sleeves: dict[str, pd.DataFrame],
+    *,
+    chart_id: str = "compare-extras-0",
+) -> go.Figure:
+    slot = starter_slot_dollars(basket)
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=history["date"],
+            y=history["dollars"],
+            name="Full basket",
+            line={"width": 3, "color": "#111827"},
+        )
+    )
+    for ticker in basket.tickers:
+        col = f"{ticker}_dollars"
+        if col in history.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=history["date"],
+                    y=history[col],
+                    name=f"{ticker} (starter)",
+                    line={"width": 1, "dash": "dash"},
+                    opacity=0.55,
+                )
+            )
+    for ticker, sleeve in extra_sleeves.items():
+        fig.add_trace(
+            go.Scatter(
+                x=sleeve["date"],
+                y=sleeve["dollars"],
+                name=f"{ticker} (added)",
+                line={"width": 2},
+            )
+        )
+    fig.update_layout(
+        title={
+            "text": (
+                f"Compare adds at one ${slot:,.0f} starter slot, "
+                f"basket start ${basket.start_value:,.0f}"
+            ),
+            "font": {"size": 16},
+        },
+        uirevision=chart_id,
+        autosize=True,
+        margin={"l": 4, "r": 4, "t": 56, "b": 88},
+        hovermode="x unified",
+        dragmode="pan",
+        legend={
+            "orientation": "h",
+            "yanchor": "top",
+            "y": -0.28,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"size": 10},
+            "itemsizing": "constant",
+            "tracegroupgap": 4,
+        },
+    )
+    fig.update_xaxes(title_text="Date", automargin=True, fixedrange=False)
+    fig.update_yaxes(
+        title_text="Dollars",
+        tickprefix="$",
+        separatethousands=True,
+        automargin=True,
+        fixedrange=False,
     )
     return fig
 
@@ -381,26 +621,89 @@ def main() -> None:
         format_func=lambda key: BASKETS[key].label,
     )
     basket = BASKETS[chosen_key]
-    st.caption(f"Holdings: {', '.join(basket.tickers)}")
+    st.caption(f"Starter holdings: {', '.join(basket.tickers)}")
+
+    state_key = extras_state_key(chosen_key)
+    if state_key not in st.session_state:
+        st.session_state[state_key] = []
+
+    extra_tickers = normalize_extra_tickers(
+        basket.tickers, tuple(st.session_state[state_key])
+    )
+    st.session_state[state_key] = list(extra_tickers)
+
+    with st.expander("Add symbols", expanded=bool(extra_tickers)):
+        slot = starter_slot_dollars(basket)
+        st.caption(
+            "Added tickers get one starter slot in dollars "
+            f"(${slot:,.0f} each). "
+            "They are not folded into the starter equal-weight book."
+        )
+        with st.form(f"add_symbols_form_{chosen_key}", clear_on_submit=True):
+            add_col, btn_col = st.columns([3, 1])
+            with add_col:
+                ticker_draft = st.text_input(
+                    "Add ticker",
+                    placeholder="NVDA or BTC-USD",
+                )
+            with btn_col:
+                add_clicked = st.form_submit_button(
+                    "Add", use_container_width=True
+                )
+
+            if add_clicked:
+                incoming = parse_ticker_input(ticker_draft)
+                if incoming:
+                    merged = normalize_extra_tickers(
+                        basket.tickers,
+                        (*st.session_state[state_key], *incoming),
+                    )
+                    st.session_state[state_key] = list(merged)
+                    st.rerun()
+                else:
+                    st.warning("Enter at least one ticker symbol.")
+
+        if extra_tickers:
+            st.markdown("**Added symbols**")
+            for ticker in extra_tickers:
+                row_col, remove_col = st.columns([4, 1])
+                row_col.markdown(f"**{ticker}**")
+                if remove_col.button(
+                    "Remove",
+                    key=f"remove_{chosen_key}_{ticker}",
+                    use_container_width=True,
+                ):
+                    st.session_state[state_key] = [
+                        t for t in st.session_state[state_key] if t != ticker
+                    ]
+                    st.rerun()
+
+    extra_tickers = normalize_extra_tickers(
+        basket.tickers, tuple(st.session_state[state_key])
+    )
+    tickers_to_load = tuple(dict.fromkeys((*basket.tickers, *extra_tickers)))
 
     try:
         with get_connection() as conn:
             with st.spinner(f"Loading {basket.label}..."):
                 prices_by_ticker: dict[str, pd.DataFrame] = {}
                 sources: dict[str, str] = {}
-                for ticker in basket.tickers:
+                for ticker in tickers_to_load:
                     prices, source = get_prices(conn, ticker)
                     prices_by_ticker[ticker] = prices
                     sources[ticker] = source
         history = basket_history(prices_by_ticker, basket)
+        extra_sleeves = parallel_sleeves_dollars(
+            prices_by_ticker, basket, extra_tickers
+        )
     except (ValueError, KeyError, OSError, duckdb.Error) as exc:
         st.error(str(exc))
         return
 
-    fetched = [ticker for ticker in basket.tickers if sources[ticker] != "cache"]
+    fetched = [ticker for ticker in tickers_to_load if sources[ticker] != "cache"]
     if not fetched:
         source_text = "Every ticker came from the DuckDB cache."
-    elif len(fetched) == len(basket.tickers):
+    elif len(fetched) == len(tickers_to_load):
         source_text = "Every ticker was fetched from yfinance and stored in DuckDB."
     else:
         source_text = (
@@ -425,9 +728,16 @@ def main() -> None:
     if "chart_revision" not in st.session_state:
         st.session_state.chart_revision = 0
 
+    chart_options = [
+        "Basket overview",
+        "Starter sleeves (dollars)",
+        "Selected holding (dollars)",
+    ]
+    if extra_tickers:
+        chart_options.append("Compare adds (dollars)")
     chart_mode = st.radio(
         "Chart",
-        options=("Basket overview", "Selected holding (dollars)"),
+        options=chart_options,
         horizontal=False,
     )
     reset_col, _ = st.columns([1, 3])
@@ -435,22 +745,97 @@ def main() -> None:
         st.session_state.chart_revision += 1
 
     chart_id = f"{chosen_key}-{chart_mode}-{st.session_state.chart_revision}"
+    slot = starter_slot_dollars(basket)
     if chart_mode == "Basket overview":
         st.caption(
-            "Dollars on the left, holdings indexed to 100 on the right. "
-            "Use Reset chart view if the axes look wrong."
+            "Dollars on the left, starter holdings indexed to 100 on the right. "
+            "Added tickers overlay as dollar sleeves sized to one starter slot "
+            f"(${slot:,.0f}). Use Reset chart view if the axes look wrong."
         )
-        fig = basket_figure(history, basket, chart_id=chart_id)
-    else:
-        selected_ticker = st.selectbox("Holding", options=list(basket.tickers))
-        shares = basket_shares(prices_by_ticker, basket)
+        fig = (
+            basket_figure_with_extras(history, basket, extra_sleeves, chart_id=chart_id)
+            if extra_sleeves
+            else basket_figure(history, basket, chart_id=chart_id)
+        )
+    elif chart_mode == "Starter sleeves (dollars)":
         st.caption(
-            f"Fixed shares for {selected_ticker}: {shares[selected_ticker]:,.4f}. "
-            f"Dollar value is shares times daily close."
+            "Each starter member repriced with fixed equal-weight shares. "
+            "All sleeves start at the same dollar slot and sum to the basket."
         )
-        fig = holding_dollar_figure(
-            history, basket, selected_ticker, chart_id=chart_id
+        fig = basket_dollars_figure(history, basket, chart_id=chart_id)
+    elif chart_mode == "Compare adds (dollars)":
+        st.caption(
+            f"Added tickers vs the basket and each starter sleeve. "
+            f"Each add uses one ${slot:,.0f} slot (start_value / "
+            f"{len(basket.tickers)}), not a share of the full book."
         )
+        fig = compare_extras_figure(
+            history, basket, extra_sleeves, chart_id=chart_id
+        )
+    else:
+        holding_options = list(basket.tickers) + list(extra_tickers)
+        selected_ticker = st.selectbox("Holding", options=holding_options)
+        if selected_ticker in basket.tickers:
+            shares = basket_shares(prices_by_ticker, basket)
+            st.caption(
+                f"Fixed shares for {selected_ticker}: {shares[selected_ticker]:,.4f}. "
+                f"Dollar value is shares times daily close."
+            )
+            fig = holding_dollar_figure(
+                history, basket, selected_ticker, chart_id=chart_id
+            )
+        else:
+            sleeve = extra_sleeves[selected_ticker]
+            shares = float(sleeve["shares"].iloc[0])
+            st.caption(
+                f"Parallel slot for {selected_ticker}: {shares:,.4f} shares "
+                f"from ${slot:,.0f} on the basket's first common day. "
+                "Not included in basket dollars."
+            )
+            fig = go.Figure()
+            fig.add_trace(
+                go.Scatter(
+                    x=history["date"],
+                    y=history["dollars"],
+                    name="Basket dollars",
+                    line={"width": 3, "color": "#111827"},
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=sleeve["date"],
+                    y=sleeve["dollars"],
+                    name=f"{selected_ticker} add",
+                    line={"width": 2, "color": "#2563eb", "dash": "dash"},
+                )
+            )
+            fig.update_layout(
+                title={
+                    "text": f"{selected_ticker} add vs basket, one starter slot",
+                    "font": {"size": 16},
+                },
+                uirevision=chart_id,
+                autosize=True,
+                margin={"l": 4, "r": 4, "t": 56, "b": 72},
+                hovermode="x unified",
+                dragmode="pan",
+                legend={
+                    "orientation": "h",
+                    "yanchor": "top",
+                    "y": -0.2,
+                    "xanchor": "left",
+                    "x": 0,
+                    "font": {"size": 10},
+                },
+            )
+            fig.update_xaxes(title_text="Date", automargin=True, fixedrange=False)
+            fig.update_yaxes(
+                title_text="Dollars",
+                tickprefix="$",
+                separatethousands=True,
+                automargin=True,
+                fixedrange=False,
+            )
     st.plotly_chart(
         fig,
         use_container_width=True,

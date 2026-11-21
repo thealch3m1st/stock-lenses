@@ -28,7 +28,9 @@ The `stock-data` volume keeps the DuckDB file across rebuilds.
 
 The left axis is the basket's dollar value. The right axis is each holding indexed to 100 on that same first date.
 
-On a phone, use the **Basket** dropdown instead of side-by-side chips. Metrics stack in a single column near 390px width, and the chart fits the screen width with a compact legend under the plot.
+On a phone, use the **Basket** dropdown instead of side-by-side chips. Metrics stack in a single column near 390px width, and the chart fits the screen width with a compact legend under the plot. Pinch zoom is disabled on the overview chart so a bad dual-axis zoom cannot stick. Tap **Reset chart view** to force axes back to the full range.
+
+Under **Chart**, pick **Selected holding (dollars)** to reprice one basket member. The app uses the same fixed share count as the equal-weight book (`start_value / n` divided by that holding's first close) and plots that sleeve beside the full basket dollar path.
 
 ## Price cache
 

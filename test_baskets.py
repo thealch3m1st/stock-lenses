@@ -3,7 +3,7 @@ from datetime import date
 
 import pandas as pd
 
-from app import BASKETS, Basket, basket_history
+from app import BASKETS, Basket, basket_history, basket_shares
 
 
 def prices(rows: list[tuple[object, float]]) -> pd.DataFrame:
@@ -95,6 +95,41 @@ class BasketHistoryTest(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             basket_history(frames, basket)
+
+    def test_per_ticker_dollar_columns_match_fixed_shares(self) -> None:
+        basket = Basket("t", "Test", ("AAA", "BBB"), 10_000.0)
+        frames = {
+            "AAA": prices(
+                [
+                    (date(2024, 1, 1), 10.0),
+                    (date(2024, 1, 2), 12.0),
+                    (date(2024, 1, 3), 20.0),
+                ]
+            ),
+            "BBB": prices(
+                [
+                    (date(2024, 1, 1), 50.0),
+                    (date(2024, 1, 2), 50.0),
+                    (date(2024, 1, 3), 40.0),
+                ]
+            ),
+        }
+        history = basket_history(frames, basket)
+        shares = basket_shares(frames, basket)
+        self.assertAlmostEqual(shares["AAA"], 500.0)
+        self.assertAlmostEqual(shares["BBB"], 100.0)
+        self.assertAlmostEqual(history["AAA_dollars"].iloc[0], 5_000.0)
+        self.assertAlmostEqual(history["BBB_dollars"].iloc[0], 5_000.0)
+        self.assertAlmostEqual(history["AAA_dollars"].iloc[1], 6_000.0)
+        self.assertAlmostEqual(history["BBB_dollars"].iloc[1], 5_000.0)
+        self.assertAlmostEqual(history["AAA_dollars"].iloc[2], 10_000.0)
+        self.assertAlmostEqual(history["BBB_dollars"].iloc[2], 4_000.0)
+        self.assertTrue(
+            (
+                history["AAA_dollars"] + history["BBB_dollars"] - history["dollars"]
+            ).abs().max()
+            < 1e-9
+        )
 
 
 if __name__ == "__main__":

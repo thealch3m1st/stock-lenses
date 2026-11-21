@@ -81,10 +81,6 @@ div[data-testid="stMetric"] {
 """
 
 
-def basket_option_label(item: Basket) -> str:
-    return item.label
-
-
 def get_connection() -> duckdb.DuckDBPyConnection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(DB_PATH))
@@ -275,7 +271,7 @@ def main() -> None:
     chosen_key = st.selectbox(
         "Basket",
         options=basket_keys,
-        format_func=lambda key: basket_option_label(BASKETS[key]),
+        format_func=lambda key: BASKETS[key].label,
     )
     basket = BASKETS[chosen_key]
     st.caption(f"Holdings: {', '.join(basket.tickers)}")
